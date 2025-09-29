@@ -48,8 +48,8 @@ This application helps network engineers and planners manage optical transport n
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/optical-network-manager.git
-cd optical-network-manager
+git clone https://github.com/freefunction/Network_Manger.git
+cd Network_Manger
 ```
 
 2. Install dependencies:
