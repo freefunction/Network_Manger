@@ -1220,8 +1220,6 @@ if __name__ == "__main__":
     # Check if running properly with streamlit
     import sys
     if 'streamlit' not in sys.modules:
-        print("❌ This is a Streamlit application!")
-        print("🚀 Please run it using: streamlit run optical_manager_corrected.py")
-        print("📖 Or install streamlit first: pip install streamlit plotly pandas networkx xlsxwriter")
+        print("please install Streamlit !")
     else:
         main()
