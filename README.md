@@ -150,22 +150,6 @@ The application uses Streamlit's session state to maintain:
 
 Configuration persists within a user session but resets on page refresh.
 
-## Deployment
-
-### Streamlit Community Cloud
-
-1. Push code to GitHub
-2. Go to [share.streamlit.io](https://share.streamlit.io)
-3. Connect your repository
-4. Deploy with one click
-
-### Other Platforms
-
-The app can be deployed on:
-- Heroku
-- AWS/GCP/Azure
-- Docker containers
-- Any platform supporting Python web apps
 
 ## Contributing
 
