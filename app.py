@@ -1111,7 +1111,8 @@ def main():
                                     total_raw_bandwidth += raw_bandwidth
                             
                             if total_connections == 0:
-                                st.write("• No traffic on this route")
+                                #st.write("• No traffic on this route")
+                                st.write("")
                             else:
                                 bandwidth_used = route.get_total_bandwidth_gbps()
                                 st.write(f"**Total: {total_raw_bandwidth} Gbps raw → {bandwidth_used:.1f} Gbps effective**")
