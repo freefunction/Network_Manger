@@ -85,18 +85,16 @@ class Route:
             och200_cost = 10000
             och400_cost = 15000
         return och200_capacity, och400_capacity, och200_cost, och400_cost
-    
+
     def _initialize_cards(self):
         """Initialize OCH cards based on traffic and manager configuration."""
         if not self.path:
             return
 
-        # Calculate EFFECTIVE bandwidth (with efficiency applied)
         total_bandwidth = self.get_total_bandwidth_gbps()
-        
         och200_capacity, och400_capacity, och200_cost, och400_cost = self._get_card_specs()
 
-        # Choose the SMALLEST card type that can handle the bandwidth
+        # Choose base type
         if total_bandwidth <= och200_capacity:
             base_card_type = CardType.OCH_200
             base_capacity = och200_capacity
@@ -106,30 +104,7 @@ class Route:
             base_capacity = och400_capacity
             base_cost = och400_cost
 
-        # Calculate how many cards needed (usually just 1 per location)
         cards_needed_per_location = max(1, math.ceil(total_bandwidth / base_capacity))
-
-        # Helper function to create cards for a location
-        def create_cards_for_location(loc: str):
-            self.cards[loc] = []
-            remaining = total_bandwidth
-            for _ in range(cards_needed_per_location):
-                used = min(base_capacity, remaining)
-                remaining = max(0, remaining - used)  # Ensure remaining doesn't go negative
-                card = OCHCard(
-                    card_type=base_card_type,
-                    location=loc,
-                    capacity_gbps=base_capacity,
-                    cost=base_cost,
-                    used_capacity_gbps=used
-                )
-                self.cards[loc].append(card)
-
-        # Create for source
-        create_cards_for_location(self.path[0])
-        # Create for destination if different
-        if len(self.path) > 1 and self.path[-1] != self.path[0]:
-            create_cards_for_location(self.path[-1])
 
         # Nested helper
         def create_cards_for_location(loc: str):
@@ -174,19 +149,10 @@ class Route:
         return sum(card.capacity_gbps for cards in self.cards.values() for card in cards)
 
     def get_utilization_percent(self) -> float:
-        """Calculate utilization as percentage of capacity per location (not total)."""
-        if not self.cards:
+        capacity = self.get_total_capacity_gbps()
+        if capacity <= 0:
             return 0.0
-        
-        # Get capacity of one location (they should all be the same)
-        first_location = list(self.cards.keys())[0]
-        capacity_per_location = sum(card.capacity_gbps for card in self.cards[first_location])
-        
-        if capacity_per_location <= 0:
-            return 0.0
-        
-        bandwidth_used = self.get_total_bandwidth_gbps()
-        return (bandwidth_used / capacity_per_location) * 100.0
+        return self.get_total_bandwidth_gbps() / capacity * 100.0
 
     def can_accommodate_traffic(self, traffic_type: TrafficType, amount: int) -> bool:
         additional_bw = traffic_type.capacity_gbps * amount
@@ -251,9 +217,9 @@ class OpticalNetworkManager:
             },
             'converter_cost': 500,
             'traffic_efficiency': {
-                '1G': 1.0,
-                '10G': 1.0,
-                '100G': 1.0
+                '1G': 0.1,
+                '10G': 0.1,
+                '100G': 0.5
             }
         }
 
@@ -859,57 +825,6 @@ def configuration_panel(manager) -> dict:
         'traffic_efficiency': {'1G': g1_efficiency, '10G': g10_efficiency, '100G': g100_efficiency}
     }
 
-def create_routes_dataframe(manager):
-    """Create routes dataframe with correct bandwidth and capacity calculations."""
-    routes_data = []
-    
-    for route_id, route in manager.routes.items():
-        # Get actual bandwidth used (with efficiency applied)
-        bandwidth_used = route.get_total_bandwidth_gbps()
-        
-        # Get actual capacity from cards (per location, not total)
-        # For display purposes, show capacity per direction
-        capacity_per_location = 0
-        if route.cards:
-            first_location = list(route.cards.keys())[0]
-            capacity_per_location = sum(card.capacity_gbps for card in route.cards[first_location])
-        
-        # Calculate utilization based on single direction capacity
-        utilization = (bandwidth_used / capacity_per_location * 100) if capacity_per_location > 0 else 0
-        
-        # Determine actual card type from the route's cards
-        card_types = set()
-        for cards_list in route.cards.values():
-            for card in cards_list:
-                card_types.add(card.card_type.value)
-        
-        # Display all card types or the primary one
-        card_type = ', '.join(sorted(card_types)) if card_types else "Unknown"
-        
-        # Extract traffic counts
-        traffic_100g = next((v for k, v in route.traffic.items() if (hasattr(k, 'value') and k.value == '100G') or k == '100G'), 0)
-        traffic_10g = next((v for k, v in route.traffic.items() if (hasattr(k, 'value') and k.value == '10G') or k == '10G'), 0)
-        traffic_1g = next((v for k, v in route.traffic.items() if (hasattr(k, 'value') and k.value == '1G') or k == '1G'), 0)
-                   
-        
-        # Calculate raw bandwidth (before efficiency)
-        raw_bandwidth = (traffic_100g * 100) + (traffic_10g * 10) + (traffic_1g * 1)
-        
-        routes_data.append({
-            'Route ID': route_id,
-            'Path': ' → '.join(route.path),
-            'Length': len(route.path),
-            '100G Traffic': traffic_100g,
-            '10G Traffic': traffic_10g,
-            '1G Traffic': traffic_1g,
-            'Raw Bandwidth (Gbps)': raw_bandwidth,
-            'Effective Bandwidth (Gbps)': f"{bandwidth_used:,.1f}",
-            'Card Capacity (Gbps)': f"{capacity_per_location:,.0f}",
-            'Utilization (%)': f"{utilization:.1f}",
-            'Card Type': card_type
-        })
-    
-    return pd.DataFrame(routes_data)
 
 
 def main():
@@ -1066,16 +981,36 @@ def main():
             if st.session_state.routes_loaded:
                 manager = st.session_state.manager
                 
-                # Create routes dataframe using the fixed function
-                df_routes = create_routes_dataframe(manager)
+                # Create routes dataframe
+                routes_data = []
+                for route_id, route in manager.routes.items():
+                    bandwidth_used = route.get_total_bandwidth_gbps()
+                    capacity = route.get_total_capacity_gbps()
+                    utilization = route.get_utilization_percent()
+                    
+                    # Determine card type
+                    card_type = "OCH-400" if capacity > 19200 else "OCH-200"
+                    
+                    routes_data.append({
+                        'Route ID': route_id,
+                        'Path': ' → '.join(route.path),
+                        'Length': len(route.path),
+                        '100G Traffic': next((v for k, v in route.traffic.items() if (hasattr(k, 'value') and k.value == '100G') or k == '100G'), 0),
+                        '10G Traffic': next((v for k, v in route.traffic.items() if (hasattr(k, 'value') and k.value == '10G') or k == '10G'), 0),
+                        '1G Traffic': next((v for k, v in route.traffic.items() if (hasattr(k, 'value') and k.value == '1G') or k == '1G'), 0),
+                        'Bandwidth Used (Gbps)': f"{bandwidth_used:,.0f}",
+                        'Capacity (Gbps)': f"{capacity:,.0f}",
+                        'Utilization (%)': f"{utilization:.1f}",
+                        'Card Type': card_type
+                    })
+                
+                df_routes = pd.DataFrame(routes_data)
                 st.dataframe(df_routes, use_container_width=True)
                 
                 # Route details
-                if not df_routes.empty:
-                    selected_route = st.selectbox(
-                        "Select route for details:", 
-                        df_routes['Route ID'].tolist()
-                    )
+                if routes_data:
+                    selected_route = st.selectbox("Select route for details:", 
+                                                [r['Route ID'] for r in routes_data])
                     
                     if selected_route:
                         route = manager.routes[selected_route]
@@ -1088,49 +1023,25 @@ def main():
                             
                             st.write("**Traffic Details:**")
                             total_connections = 0
-                            total_raw_bandwidth = 0
-                            
                             for traffic_type in TrafficType:
                                 count = route.traffic.get(traffic_type, 0)
                                 if count > 0:
-                                    raw_bandwidth = count * traffic_type.capacity_gbps
-                                    
-                                    # Get efficiency factor
-                                    eff = 1.0
-                                    if manager.config:
-                                        eff_cfg = manager.config.get('traffic_efficiency', {})
-                                        eff = eff_cfg.get(traffic_type.value, 1.0)
-                                    
-                                    effective_bandwidth = raw_bandwidth * eff
-                                    
-                                    st.write(
-                                        f"• {traffic_type.value}: {count} connections "
-                                        f"({raw_bandwidth} Gbps raw → {effective_bandwidth:.1f} Gbps effective)"
-                                    )
+                                    bandwidth = count * traffic_type.capacity_gbps
+                                    st.write(f"• {traffic_type.value}: {count} connections ({bandwidth} Gbps)")
                                     total_connections += count
-                                    total_raw_bandwidth += raw_bandwidth
                             
                             if total_connections == 0:
                                 st.write("• No traffic on this route")
-                            else:
-                                bandwidth_used = route.get_total_bandwidth_gbps()
-                                st.write(f"**Total: {total_raw_bandwidth} Gbps raw → {bandwidth_used:.1f} Gbps effective**")
                         
                         with col2:
                             st.write("**OCH Configuration:**")
                             bandwidth_used = route.get_total_bandwidth_gbps()
-                            
-                            # Get capacity per location
-                            capacity_per_location = 0
-                            if route.cards:
-                                first_location = list(route.cards.keys())[0]
-                                capacity_per_location = sum(card.capacity_gbps for card in route.cards[first_location])
-                            
+                            capacity = route.get_total_capacity_gbps()
                             utilization = route.get_utilization_percent()
                             
-                            st.write(f"• Effective Bandwidth Used: {bandwidth_used:,.1f} Gbps")
-                            st.write(f"• OCH Card Capacity: {capacity_per_location:,.0f} Gbps")
-                            st.write(f"• Available: {capacity_per_location - bandwidth_used:,.1f} Gbps")
+                            st.write(f"• Total Bandwidth Used: {bandwidth_used:,.0f} Gbps")
+                            st.write(f"• OCH Capacity: {capacity:,.0f} Gbps")
+                            st.write(f"• Available: {capacity - bandwidth_used:,.0f} Gbps")
                             
                             # Progress bar with proper capping
                             progress_value = min(utilization, 100) / 100
@@ -1140,96 +1051,66 @@ def main():
                                 st.error("⚠️ Route overloaded! Needs card upgrade.")
                             elif utilization > 90:
                                 st.warning("⚠️ High utilization - consider monitoring")
-                            else:
-                                st.success("✅ Good utilization level")
                             
                             # Card information
-                            st.write("**Card Details:**")
-                            for location, cards_list in route.cards.items():
-                                st.write(f"Location: **{location}**")
-                                for i, card in enumerate(cards_list, 1):
-                                    st.write(
-                                        f"  • Card {i}: {card.card_type.value} "
-                                        f"({card.used_capacity_gbps:,.1f} / {card.capacity_gbps:,.0f} Gbps)"
-                                    )
+                            if route.cards:
+                                first_location = list(route.cards.keys())[0]
+                                first_card = route.cards[first_location][0]
+                                st.write(f"• Card Type: {first_card.card_type.value}")
+                                st.write(f"• Number of Card Locations: {len(route.cards)}")
             else:
                 st.info("No routes loaded yet.")
-
+        
         with tab3:
             if st.session_state.routes_loaded:
+                # Export functionality
                 st.write("Export current network state:")
                 
                 manager = st.session_state.manager
+                export_data = []
                 
-                # Use the same fixed function for consistency
-                df_export = create_routes_dataframe(manager)
+                for route_id, route in manager.routes.items():
+                    bandwidth_used = route.get_total_bandwidth_gbps()
+                    capacity = route.get_total_capacity_gbps()
+                    utilization = route.get_utilization_percent()
+                    
+                    # Determine card type
+                    card_type = "OCH-400" if capacity > 19200 else "OCH-200"
+                    
+                    # Extract traffic values
+                    traffic_100g = next((v for k, v in route.traffic.items() if (hasattr(k, 'value') and k.value == '100G') or k == '100G'), 0)
+                    traffic_10g = next((v for k, v in route.traffic.items() if (hasattr(k, 'value') and k.value == '10G') or k == '10G'), 0)
+                    traffic_1g = next((v for k, v in route.traffic.items() if (hasattr(k, 'value') and k.value == '1G') or k == '1G'), 0)
+                    
+                    export_data.append({
+                        'Route ID': route_id,
+                        'Path': ' → '.join(route.path),
+                        'Length': len(route.path),
+                        '100G Traffic': traffic_100g,
+                        '10G Traffic': traffic_10g,
+                        '1G Traffic': traffic_1g,
+                        'Bandwidth Used (Gbps)': round(bandwidth_used, 2),
+                        'Capacity (Gbps)': round(capacity, 2),
+                        'Utilization (%)': round(utilization, 1),
+                        'Card Type': card_type
+                    })
                 
-                # Convert bandwidth columns to numeric for export
-                df_export_copy = df_export.copy()
-                df_export_copy['Effective Bandwidth (Gbps)'] = df_export_copy['Effective Bandwidth (Gbps)'].str.replace(',', '').astype(float)
-                df_export_copy['Card Capacity (Gbps)'] = df_export_copy['Card Capacity (Gbps)'].str.replace(',', '').astype(float)
-                df_export_copy['Utilization (%)'] = df_export_copy['Utilization (%)'].astype(float)
-                
-                # Add summary sheet data
-                summary = manager.get_network_summary()
-                summary_data = {
-                    'Metric': [
-                        'Total Routes',
-                        'Total Nodes',
-                        'Total Connections',
-                        'Total Bandwidth Used (Gbps)',
-                        'Total Capacity (Gbps)',
-                        'Overall Utilization (%)',
-                        'Average Route Utilization (%)',
-                        'Max Route Utilization (%)',
-                        'OCH-200 Cards',
-                        'OCH-400 Cards'
-                    ],
-                    'Value': [
-                        summary['total_routes'],
-                        summary['total_nodes'],
-                        summary['total_edges'],
-                        round(summary['total_bandwidth_used_gbps'], 1),
-                        round(summary['total_bandwidth_capacity_gbps'], 1),
-                        summary['overall_utilization_percent'],
-                        summary['average_route_utilization'],
-                        summary['max_route_utilization'],
-                        summary['card_statistics'].get('OCH-200', 0),
-                        summary['card_statistics'].get('OCH-400', 0)
-                    ]
-                }
-                df_summary = pd.DataFrame(summary_data)
+                df_export = pd.DataFrame(export_data)
                 
                 # Convert to Excel
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df_export_copy.to_excel(writer, sheet_name='Routes', index=False)
-                    df_summary.to_excel(writer, sheet_name='Summary', index=False)
-                    
-                    # Add traffic summary
-                    traffic_data = {
-                        'Traffic Type': ['100G', '10G', '1G'],
-                        'Connections': [
-                            summary['total_traffic'].get('100G', 0),
-                            summary['total_traffic'].get('10G', 0),
-                            summary['total_traffic'].get('1G', 0)
-                        ]
-                    }
-                    df_traffic = pd.DataFrame(traffic_data)
-                    df_traffic.to_excel(writer, sheet_name='Traffic Summary', index=False)
+                    df_export.to_excel(writer, sheet_name='Routes', index=False)
                 
                 st.download_button(
                     label="📥 Download Full Network Report (Excel)",
                     data=output.getvalue(),
-                    file_name=f"network_report_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    file_name="network_routes_full_report.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-                
-                # Preview
-                st.write("**Export Preview:**")
-                st.dataframe(df_export.head(10), use_container_width=True)
             else:
-                st.info("No data to export.")    
+                st.info("No data to export.")
+    
     elif page == "🚀 Simulation":
         simulate_injection_ui()
         
